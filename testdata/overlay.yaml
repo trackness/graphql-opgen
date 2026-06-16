@@ -1,0 +1,5 @@
+# Curated operation metadata the SDL cannot express, keyed by root-field name.
+destructive:
+  - ordersDestroy
+jobReturning:
+  - reindexCatalog

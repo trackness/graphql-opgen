@@ -1,0 +1,164 @@
+# Toy commerce SDL for genops conformance tests. Neutral entities only.
+
+scalar DateTime
+scalar JSON
+
+enum OrderStatus {
+  PENDING
+  PAID
+  SHIPPED
+  CANCELLED @deprecated(reason: "merged into a separate refund flow")
+}
+
+# Category is a ref-able entity (id + name) that references itself: Category.parent
+# is a value-type cycle through a ref-able type, so the nested edge terminates at a
+# CategoryRef leaf rather than recursing into CategoryFields.
+type Category {
+  id: ID!
+  name: String!
+  parent: Category
+  children: [Category!]!
+}
+
+# Customer is a ref-able entity; legacyCode is deprecated and must be excluded from
+# the canonical fragment but recorded in the catalog.
+type Customer {
+  id: ID!
+  name: String!
+  email: String
+  createdAt: DateTime!
+  channel: Channel
+  legacyCode: String @deprecated(reason: "use id")
+}
+
+# Product is a ref-able entity carrying scalars, an enum-free edge to Category, and
+# a self-list (related) that terminates at a ProductRef.
+type Product {
+  id: ID!
+  name: String!
+  price: Int!
+  metadata: JSON
+  category: Category!
+  related: [Product!]!
+}
+
+# Region and Locale form a value-type cycle: neither has an id, so neither is
+# ref-able; each references the other, so the generator must terminate the cycle
+# with a scalars-only inline selection recorded as path-named.
+type Region {
+  code: String!
+  label: String!
+  defaultLocale: Locale!
+}
+
+type Locale {
+  tag: String!
+  region: Region!
+}
+
+# Receipt has scalars plus a value-type edge to Region (a one-way edge into the
+# Region/Locale graph, which expands fully).
+type Receipt {
+  number: String!
+  issuedAt: DateTime!
+  origin: Region!
+}
+
+# OrderLine is a mixed wrapper: no id, but it carries an object edge to a ref-able
+# entity (Product). It is inlined as a path-named selection.
+type OrderLine {
+  quantity: Int!
+  product: Product!
+}
+
+type Order {
+  id: ID!
+  name: String!
+  status: OrderStatus!
+  customer: Customer!
+  lines: [OrderLine!]!
+  receipt: Receipt
+  payment: Payment
+}
+
+# A union return exercises the abstract-type selection path (__typename + per-member
+# inline fragments), recorded as path-named.
+union SearchHit = Product | Customer | Order
+
+# CardPayment and CashPayment disagree on the type of their shared `amount` field
+# (Int vs String). A union of the two, used as an entity EDGE (Order.payment),
+# exercises the conflicting-union path: each member's selection is rendered under
+# member-prefixed response aliases rather than a fragment spread.
+type CardPayment {
+  amount: Int!
+  last4: String!
+  card: Product
+}
+
+type CashPayment {
+  amount: String!
+  currency: String!
+}
+
+union Payment = CardPayment | CashPayment
+
+# Channel is an interface used as an entity edge (Customer.channel), exercising the
+# interface branch of abstract-member resolution (members are the implementors).
+interface Channel {
+  handle: String!
+}
+
+type EmailChannel implements Channel {
+  handle: String!
+  verified: Boolean!
+}
+
+type PhoneChannel implements Channel {
+  handle: String!
+  region: Region!
+}
+
+input OrderFilter {
+  status: OrderStatus
+  customerId: ID
+  # A self-referential input object exercises the catalog's cycle-terminating
+  # reachability walk.
+  and: [OrderFilter!]
+  or: [OrderFilter!]
+}
+
+input OrderInput {
+  name: String!
+  customerId: ID!
+  status: OrderStatus = PENDING
+}
+
+input ArchiveInput {
+  id: ID!
+}
+
+type Query {
+  # Single-entity nullable lookup -> canMiss -> NotFound exit code.
+  order(id: ID!): Order
+  customer(id: ID!): Customer
+  # List query -> never a miss.
+  orders(filter: OrderFilter): [Order!]!
+  products: [Product!]!
+  # Abstract return. `type` is a Go keyword, so its forwarded variable is
+  # suffixed with an underscore by the operation generator.
+  search(term: String!, type: String): [SearchHit!]!
+  # Deprecated root field with a deprecated argument; both stay reachable.
+  legacyOrders(page: Int @deprecated(reason: "unused")): [Order!]! @deprecated(reason: "use orders")
+}
+
+type Mutation {
+  orderCreate(input: OrderInput!): Order!
+  # Destructive op (flagged via overlay).
+  ordersDestroy(ids: [ID!]!): Boolean!
+  # Job-returning op (flagged via overlay).
+  reindexCatalog(input: ArchiveInput!): ID!
+}
+
+type Subscription {
+  orderUpdated: Order!
+}
