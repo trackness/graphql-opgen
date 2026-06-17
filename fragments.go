@@ -352,6 +352,19 @@ func (fs *FragmentSet) writeObjectEdge(b *strings.Builder, src, label string, f 
 			fs.writeSelection(b, t, inner, false)
 		})
 		delete(fs.onPath, t.Name)
+	case fs.building[t.Name]:
+		// A value-type edge to a type whose <T>Fields is still under construction
+		// (e.g. Performer.edits -> Edit while EditFields is being built, because
+		// Edit.target: EditTarget loops back to Performer/Scene/Tag). valueCycleEdge
+		// cannot see this cycle: its return path leaves the object-edge graph
+		// through a union/interface edge, which buildValueEdges deliberately
+		// excludes — so only the live construction stack catches it. Terminate
+		// scalars-only (path-named, B6), exactly as valueCycleEdge does for the
+		// object-edge-only case, so the fragment DAG stays finite and acyclic.
+		fs.path.types[t.Name] = true
+		writeInline(b, label, indent, func(inner string) {
+			fs.writeScalarsOnly(b, t, inner)
+		})
 	default:
 		writeSpread(b, label, fs.ensureFields(t), indent)
 	}
