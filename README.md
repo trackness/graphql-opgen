@@ -131,6 +131,16 @@ through `Config` rather than baked into the generator:
 - **`TargetPackageImport`** / **`OperationConstSuffix`** — the import path and
   suffix that stamp the generated command table's references to the operation
   consts.
+- **`SelectionVariants`** / **`VariantEdges`** — optional trimmed selections for
+  object types. The full-field selection genops derives from the SDL can hit a
+  field a server resolves only in some contexts — an owner-only field, or an edge
+  whose resolver returns null against the schema's non-null typing. A variant
+  omits exactly those fields (named explicitly, or derived from a directive they
+  carry) and is materialised as a distinct `<T><Variant>Fields` fragment, routed
+  to the breaking contexts (a root field, or a `Type.field` edge) via
+  `VariantEdges`; the canonical `<T>Fields` is untouched everywhere else. Every
+  type, field, directive, and route is validated against the schema at compile
+  time, so a drifted reference is a red build, not a silent leak.
 
 ## License
 

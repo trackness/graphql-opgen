@@ -31,6 +31,41 @@ type Config struct {
 	// generated output, so the caller owns its service-specific wording; an empty
 	// value falls back to a generic comment.
 	CommandTableDoc []string
+	// SelectionVariants defines named alternate selections for object types. A
+	// variant is the type's canonical <T>Fields selection minus a set of fields,
+	// materialised as a distinct fragment <T><Variant>Fields and emitted only
+	// where an edge routes to it (see VariantEdges); the canonical <T>Fields is
+	// left untouched. A variant lets a field that resolves only in some contexts
+	// — an auth-gated field a server returns for a self lookup but not a third
+	// party, or a field a server leaves null on one edge but not another — be
+	// omitted exactly where it would break, without losing it where it works.
+	//
+	// The map is keyed by object type name, then by variant name. Every type,
+	// field, and directive is validated against the schema at [Compile] time, so
+	// a rename or removal upstream is a red build rather than a silent leak.
+	SelectionVariants map[string]map[string]VariantExclude
+	// VariantEdges routes a selection context to a named variant of the edge's
+	// target type instead of the canonical <T>Fields. A key is either a root
+	// field name (e.g. "findUser" — an operation's payload root) or a
+	// "ParentType.field" object edge (e.g. "Edit.user", "SceneEdit.fingerprints").
+	// The value names the variant as "Type/Variant" (e.g. "User/Public"); Type
+	// must equal the edge's target type and Variant must be defined for it in
+	// SelectionVariants. Every key and value is validated at [Compile] time.
+	VariantEdges map[string]string
+}
+
+// VariantExclude specifies which of an object type's fields a selection variant
+// omits, by explicit name and/or by directive. Naming a directive derives the
+// excluded set from the SDL — a field gated by that directive (e.g. an
+// owner-only @isUserOwner) is dropped from the variant, and a newly gated field
+// upstream is excluded automatically rather than silently leaking into a
+// selection that cannot resolve it. At least one of the two must match a field.
+type VariantExclude struct {
+	// Fields are explicit field names to omit from the variant.
+	Fields []string
+	// Directives names schema directives; any field on the type carrying one of
+	// them is omitted from the variant.
+	Directives []string
 }
 
 // ExitCodeProvider names the caller's exit codes. Base is the set every command

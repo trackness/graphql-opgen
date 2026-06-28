@@ -35,7 +35,16 @@ func Compile(schemaDir, overlayPath, schemaVersion string, cfg Config) (*Compile
 		return nil, err
 	}
 
-	fs := BuildFragments(s)
+	// Apply the caller's selection variants before building the fragment
+	// universe, so an edge routed to a variant inside a canonical fragment is in
+	// effect as that fragment is constructed (operation-level routing would work
+	// either way, but a routed edge nested in a <T>Fields fragment would not).
+	fs := newFragmentSet(s)
+	if err := fs.applyVariants(cfg.SelectionVariants, cfg.VariantEdges); err != nil {
+		return nil, err
+	}
+	fs.buildUniverse()
+
 	ops, err := BuildOperations(s, fs)
 	if err != nil {
 		return nil, err

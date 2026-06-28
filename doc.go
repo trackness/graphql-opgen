@@ -22,6 +22,12 @@
 //     invariant.
 //   - TargetPackageImport — the import path of the package holding the generated
 //     genqlient operation consts the emitted command table references.
+//   - SelectionVariants / VariantEdges — optional trimmed selections for object
+//     types, each omitting a set of fields (by name or by directive), routed to
+//     specific contexts (a root field or a "Type.field" edge). They let a field
+//     a server resolves only in some contexts — an owner-only field, an edge a
+//     resolver leaves null against the SDL's non-null typing — be dropped exactly
+//     where it would break, leaving the canonical <T>Fields untouched elsewhere.
 //
 // Field enumeration distinguishes two surfaces:
 //

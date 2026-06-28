@@ -703,3 +703,156 @@ func fragmentBody(t *testing.T, blob, name string) string {
 	}
 	return rest[:end+3]
 }
+
+// opBlock returns the source of the named operation (e.g. "Customer" -> the
+// `query Customer(...) { ... }` block), up to its closing brace line.
+func opBlock(t *testing.T, blob, name string) string {
+	t.Helper()
+	for _, kw := range [...]string{"query " + name, "mutation " + name, "subscription " + name} {
+		for _, marker := range [...]string{kw + " {", kw + "("} {
+			if i := strings.Index(blob, marker); i >= 0 {
+				rest := blob[i:]
+				if end := strings.Index(rest, "\n}\n"); end >= 0 {
+					return rest[:end+3]
+				}
+				return rest
+			}
+		}
+	}
+	t.Fatalf("operation %q not found", name)
+	return ""
+}
+
+// variantConfig augments the toy config with selection variants: a
+// directive-derived public variant of Customer (dropping the @private email) and
+// a field-based minimal variant of Address (dropping city), routed at the
+// `customer` root payload and the Customer.address edge respectively.
+func variantConfig() Config {
+	cfg := toyConfig()
+	cfg.SelectionVariants = map[string]map[string]VariantExclude{
+		"Customer": {"Public": {Directives: []string{"private"}}},
+		"Address":  {"Minimal": {Fields: []string{"city"}}},
+	}
+	cfg.VariantEdges = map[string]string{
+		"customer":         "Customer/Public",
+		"Customer.address": "Address/Minimal",
+	}
+	return cfg
+}
+
+// TestSelectionVariants checks that a routed variant replaces the canonical
+// <T>Fields exactly at the configured context — at a root payload and at a
+// nested edge — drops the right fields (by directive and by name), still routes
+// nested edges, leaves the canonical fragment intact, and stays deterministic.
+func TestSelectionVariants(t *testing.T) {
+	// Canonical (no variants): the customer payload spreads the full CustomerFields,
+	// which carries email and a full Address edge carrying city.
+	base, err := Compile(schemaDir, overlayPath, schemaVer, toyConfig())
+	if err != nil {
+		t.Fatalf("Compile base: %v", err)
+	}
+	if !strings.Contains(base.Operations, "...CustomerFields") {
+		t.Error("canonical customer op should spread CustomerFields")
+	}
+	if cf := fragmentBody(t, base.Fragments, "CustomerFields"); !strings.Contains(cf, "email") {
+		t.Errorf("canonical CustomerFields should carry email:\n%s", cf)
+	}
+	if af := fragmentBody(t, base.Fragments, "AddressFields"); !strings.Contains(af, "city") {
+		t.Errorf("canonical AddressFields should carry city:\n%s", af)
+	}
+
+	// With variants: the customer payload spreads CustomerPublicFields (no email),
+	// whose address edge spreads AddressMinimalFields (no city).
+	c, err := Compile(schemaDir, overlayPath, schemaVer, variantConfig())
+	if err != nil {
+		t.Fatalf("Compile variants: %v", err)
+	}
+	// The routing is scoped to the customer payload: that operation block spreads
+	// the variant, while the canonical CustomerFields stays in use elsewhere (the
+	// `search` union member ... on Customer, which is not routed).
+	custOp := opBlock(t, c.Operations, "Customer")
+	if !strings.Contains(custOp, "...CustomerPublicFields") {
+		t.Errorf("customer op should spread the routed variant CustomerPublicFields:\n%s", custOp)
+	}
+	if strings.Contains(custOp, "...CustomerFields") {
+		t.Errorf("customer op must spread the variant, not the canonical CustomerFields:\n%s", custOp)
+	}
+	if !strings.Contains(c.Operations, "...CustomerFields") {
+		t.Error("canonical CustomerFields should still be spread by the unrouted search union member")
+	}
+
+	cpf := fragmentBody(t, c.Fragments, "CustomerPublicFields")
+	if strings.Contains(cpf, "email") {
+		t.Errorf("CustomerPublicFields must drop the @private email:\n%s", cpf)
+	}
+	for _, w := range []string{"id", "name", "...AddressMinimalFields"} {
+		if !strings.Contains(cpf, w) {
+			t.Errorf("CustomerPublicFields missing %q (a nested edge must still route):\n%s", w, cpf)
+		}
+	}
+
+	amf := fragmentBody(t, c.Fragments, "AddressMinimalFields")
+	if strings.Contains(amf, "city") {
+		t.Errorf("AddressMinimalFields must drop city:\n%s", amf)
+	}
+	if !strings.Contains(amf, "street") {
+		t.Errorf("AddressMinimalFields should keep street:\n%s", amf)
+	}
+
+	c2, err := Compile(schemaDir, overlayPath, schemaVer, variantConfig())
+	if err != nil {
+		t.Fatalf("Compile variants (2): %v", err)
+	}
+	if c.Fragments != c2.Fragments || c.Operations != c2.Operations {
+		t.Error("variant compile is not deterministic")
+	}
+}
+
+// TestSelectionVariantValidation checks that every malformed variant or route is
+// a Compile error — drift in the config is a red build, not a silent leak.
+func TestSelectionVariantValidation(t *testing.T) {
+	cases := []struct {
+		name     string
+		variants map[string]map[string]VariantExclude
+		edges    map[string]string
+		wantErr  string
+	}{
+		{"unknown type", map[string]map[string]VariantExclude{"Nope": {"V": {Fields: []string{"x"}}}}, nil, "not an object type"},
+		{"unknown field", map[string]map[string]VariantExclude{"Customer": {"V": {Fields: []string{"nope"}}}}, nil, "does not exist"},
+		{"directive matches nothing", map[string]map[string]VariantExclude{"Customer": {"V": {Directives: []string{"nope"}}}}, nil, "carries directive"},
+		{"excludes nothing", map[string]map[string]VariantExclude{"Customer": {"V": {}}}, nil, "excludes no fields"},
+		{"excludes everything", map[string]map[string]VariantExclude{"Address": {"V": {Fields: []string{"street", "city"}}}}, nil, "every selectable field"},
+		{
+			"bad route format",
+			map[string]map[string]VariantExclude{"Customer": {"Public": {Directives: []string{"private"}}}},
+			map[string]string{"customer": "Customer-Public"}, "Type/Variant",
+		},
+		{
+			"unknown variant in edge",
+			map[string]map[string]VariantExclude{"Customer": {"Public": {Directives: []string{"private"}}}},
+			map[string]string{"customer": "Customer/Nope"}, "no such variant",
+		},
+		{
+			"context not in schema",
+			map[string]map[string]VariantExclude{"Customer": {"Public": {Directives: []string{"private"}}}},
+			map[string]string{"nosuchfield": "Customer/Public"}, "not a root field",
+		},
+		{
+			"edge target mismatch",
+			map[string]map[string]VariantExclude{"Customer": {"Public": {Directives: []string{"private"}}}},
+			map[string]string{"order": "Customer/Public"}, "targets type Order",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := toyConfig()
+			cfg.SelectionVariants = tc.variants
+			cfg.VariantEdges = tc.edges
+			if _, err := Compile(schemaDir, overlayPath, schemaVer, cfg); err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			} else if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}

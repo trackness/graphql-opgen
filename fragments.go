@@ -122,6 +122,13 @@ type FragmentSet struct {
 	// rather than the construction DFS stack — so an Address<->Region edge
 	// terminates the same way no matter which fragment is built first (genops-4).
 	valueEdges map[string]map[string]bool
+	// variantExcludes and variantEdges hold the resolved selection-variant config
+	// (see applyVariants). variantExcludes[type][variant] is the set of field
+	// names that variant omits; variantEdges[context] names the "Type/Variant" a
+	// root field or "ParentType.field" edge routes to. Both are empty unless the
+	// caller supplied Config.SelectionVariants / VariantEdges.
+	variantExcludes map[string]map[string]map[string]bool
+	variantEdges    map[string]string
 }
 
 type pathNamedRecorder struct {
@@ -132,12 +139,14 @@ type pathNamedRecorder struct {
 // materialised on demand by ensureRef / ensureFields.
 func newFragmentSet(s *ast.Schema) *FragmentSet {
 	return &FragmentSet{
-		schema:     s,
-		bodies:     map[string]string{},
-		building:   map[string]bool{},
-		onPath:     map[string]bool{},
-		path:       &pathNamedRecorder{types: map[string]bool{}},
-		valueEdges: buildValueEdges(s),
+		schema:          s,
+		bodies:          map[string]string{},
+		building:        map[string]bool{},
+		onPath:          map[string]bool{},
+		path:            &pathNamedRecorder{types: map[string]bool{}},
+		valueEdges:      buildValueEdges(s),
+		variantExcludes: map[string]map[string]map[string]bool{},
+		variantEdges:    map[string]string{},
 	}
 }
 
@@ -211,9 +220,19 @@ func (fs *FragmentSet) valueCycleEdge(src string, t *ast.Definition) bool {
 // for conformance.
 func BuildFragments(s *ast.Schema) *FragmentSet {
 	fs := newFragmentSet(s)
-	// Materialise a fragment for every ref-able entity and every expandable
-	// object type reachable from the schema, in sorted type order so cycle
-	// termination is independent of any operation's walk order.
+	fs.buildUniverse()
+	return fs
+}
+
+// buildUniverse materialises a fragment for every ref-able entity and every
+// expandable object type reachable from the schema, in sorted type order so
+// cycle termination is independent of any operation's walk order. It is split
+// from BuildFragments so [Compile] can apply the caller's selection variants
+// (see applyVariants) BEFORE the universe is built — an edge routed to a variant
+// inside a canonical fragment (e.g. SceneEditFields.fingerprints) must be in
+// effect when that fragment is constructed, not after.
+func (fs *FragmentSet) buildUniverse() {
+	s := fs.schema
 	for _, name := range slices.Sorted(maps.Keys(s.Types)) {
 		def := s.Types[name]
 		if def.Kind != ast.Object || strings.HasPrefix(name, "__") || isRootOperation(s, def) {
@@ -226,7 +245,6 @@ func BuildFragments(s *ast.Schema) *FragmentSet {
 			fs.ensureFields(def)
 		}
 	}
-	return fs
 }
 
 // Fragment returns the text of a named fragment, if present.
@@ -273,7 +291,7 @@ func (fs *FragmentSet) ensureFields(def *ast.Definition) string {
 	fs.onPath = map[string]bool{}
 	var b strings.Builder
 	fmt.Fprintf(&b, "fragment %s on %s {\n", name, def.Name)
-	fs.writeSelection(&b, def, "  ", false)
+	fs.writeSelection(&b, def, "  ", false, nil)
 	b.WriteString("}\n")
 	fs.onPath = savedOnPath
 	delete(fs.building, def.Name)
@@ -285,10 +303,13 @@ func (fs *FragmentSet) ensureFields(def *ast.Definition) string {
 // full is true (an operation's payload root), ref-able edges expand to the full
 // <T>Fields; otherwise (inside a fragment) they terminate at <T>Ref (B2). src is
 // the name of the type whose selection is being written — the cycle origin for
-// the order-independent value-type termination in writeObjectEdge.
-func (fs *FragmentSet) writeSelection(b *strings.Builder, def *ast.Definition, indent string, full bool) {
+// the order-independent value-type termination in writeObjectEdge. exclude, when
+// non-nil, omits the named fields from this selection (a variant fragment, see
+// ensureVariantFields); it applies only to def's own fields, never recursively —
+// nested edges resolve through their own canonical fragments.
+func (fs *FragmentSet) writeSelection(b *strings.Builder, def *ast.Definition, indent string, full bool, exclude map[string]bool) {
 	for _, f := range def.Fields {
-		if !selectable(f) {
+		if !selectable(f) || exclude[f.Name] {
 			continue
 		}
 		t := fs.schema.Types[BaseTypeName(f.Type)]
@@ -318,7 +339,7 @@ func (fs *FragmentSet) writeObjectEdge(b *strings.Builder, src, label string, f 
 		// A Ref is a leaf and a Fields fragment is memoised + on-path guarded, so
 		// both are cycle-safe.
 		if full {
-			writeSpread(b, label, fs.ensureFields(t), indent)
+			writeSpread(b, label, fs.fieldsFor(src+"."+f.Name, t), indent)
 		} else {
 			writeSpread(b, label, fs.ensureRef(t), indent)
 		}
@@ -349,7 +370,7 @@ func (fs *FragmentSet) writeObjectEdge(b *strings.Builder, src, label string, f 
 		fs.path.types[t.Name] = true
 		fs.onPath[t.Name] = true
 		writeInline(b, label, indent, func(inner string) {
-			fs.writeSelection(b, t, inner, false)
+			fs.writeSelection(b, t, inner, false, nil)
 		})
 		delete(fs.onPath, t.Name)
 	case fs.building[t.Name]:
@@ -366,7 +387,7 @@ func (fs *FragmentSet) writeObjectEdge(b *strings.Builder, src, label string, f 
 			fs.writeScalarsOnly(b, t, inner)
 		})
 	default:
-		writeSpread(b, label, fs.ensureFields(t), indent)
+		writeSpread(b, label, fs.fieldsFor(src+"."+f.Name, t), indent)
 	}
 }
 

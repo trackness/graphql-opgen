@@ -127,10 +127,11 @@ func (fs *FragmentSet) renderRootField(b *strings.Builder, f *ast.FieldDefinitio
 		fmt.Fprintf(b, "%s}\n", indent)
 	case IsRefable(def):
 		// Entity payload: flatten the single fragment spread so the response
-		// field binds directly to the canonical <T>Fields type. ensureFields
-		// materialises the fragment — an entity returned only directly (e.g.
-		// Receipt) is otherwise referenced but never emitted.
-		frag := fs.ensureFields(def)
+		// field binds directly to the <T>Fields type. fieldsFor materialises the
+		// fragment — an entity returned only directly (e.g. Receipt) is otherwise
+		// referenced but never emitted — and routes the root field to a selection
+		// variant if the caller configured one for it (e.g. findUser -> Public).
+		frag := fs.fieldsFor(f.Name, def)
 		fmt.Fprintf(b, "%s%s\n", indent, flattenDirective)
 		fmt.Fprintf(b, "%s%s {\n", indent, call)
 		fmt.Fprintf(b, "%s...%s\n", indent+"  ", frag)
@@ -143,7 +144,7 @@ func (fs *FragmentSet) renderRootField(b *strings.Builder, f *ast.FieldDefinitio
 		// fragments built underneath.
 		fs.onPath[def.Name] = true
 		fmt.Fprintf(b, "%s%s {\n", indent, call)
-		fs.writeSelection(b, def, indent+"  ", true)
+		fs.writeSelection(b, def, indent+"  ", true, nil)
 		fmt.Fprintf(b, "%s}\n", indent)
 		delete(fs.onPath, def.Name)
 	}

@@ -3,6 +3,10 @@
 scalar DateTime
 scalar JSON
 
+# @private marks a field a server resolves only for the owning principal, used to
+# exercise directive-derived selection variants (Config.SelectionVariants).
+directive @private on FIELD_DEFINITION
+
 enum OrderStatus {
   PENDING
   PAID
@@ -21,14 +25,25 @@ type Category {
 }
 
 # Customer is a ref-able entity; legacyCode is deprecated and must be excluded from
-# the canonical fragment but recorded in the catalog.
+# the canonical fragment but recorded in the catalog. email carries @private (an
+# owner-only field) and address is a value-type edge to Address, so Customer
+# exercises both directive- and field-based selection variants and edge routing.
 type Customer {
   id: ID!
   name: String!
-  email: String
+  email: String @private
   createdAt: DateTime!
   channel: Channel
+  address: Address
   legacyCode: String @deprecated(reason: "use id")
+}
+
+# Address is a value type (no id, scalar leaves only), so a Customer selection
+# spreads it as a flattened ...AddressFields edge — the value-type edge routed in
+# the selection-variant test.
+type Address {
+  street: String!
+  city: String!
 }
 
 # Product is a ref-able entity carrying scalars, an enum-free edge to Category, and
